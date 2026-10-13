@@ -32,6 +32,7 @@ import {
 } from "../domain/rawBinary.js";
 import type { BinaryArchitecture } from "../domain/binaryTargetTypes.js";
 import { observeMzWindowsHeader } from "../domain/dosMz.js";
+import { hasBinaryPlistSignature } from "../domain/apple/appleArchiveFormat.js";
 import {
   hasZipSignature,
   isZipPackageFormat,
@@ -75,6 +76,8 @@ export const parseBinaryTarget = async (
     await access(candidate, constants.R_OK);
     throwIfTargetResolutionCancelled(signal);
     const canonical = await realpath(candidate);
+    // Windows native admission must inspect the caller-selected reparse components.
+    const sourcePath = process.platform === "win32" ? candidate : canonical;
     throwIfTargetResolutionCancelled(signal);
     const resolved = await resolveAppBundle(canonical);
     throwIfTargetResolutionCancelled(signal);
@@ -112,7 +115,7 @@ export const parseBinaryTarget = async (
           );
         return ok({
           path,
-          sourcePath: canonical,
+          sourcePath,
           sha256: await sha256Handle(handle, path, metadata, signal),
           kind: "executable",
           format: "raw-binary",
@@ -151,7 +154,7 @@ export const parseBinaryTarget = async (
           );
         return ok({
           path,
-          sourcePath: canonical,
+          sourcePath,
           sha256: await sha256Handle(handle, path, metadata, signal),
           kind: "executable",
           format: "dos-com",
@@ -159,22 +162,27 @@ export const parseBinaryTarget = async (
           availableArchitectures: ["x86"],
         });
       }
+      // Probe WASM content before suffix-only database routing; an explicit
+      // database selection keeps the caller's chosen interpretation.
+      const artifactFormat =
+        targetKind === "database"
+          ? undefined
+          : await detectArtifactFormat(path, handle, signal);
       if (
         targetKind === "database" ||
         (targetKind === undefined && path.toLowerCase().endsWith(".hop"))
       )
         return ok({
           path,
-          sourcePath: process.platform === "win32" ? candidate : canonical,
+          sourcePath,
           sha256: await sha256Handle(handle, path, metadata, signal),
           kind: "database",
           format: "analysis-database",
         });
-      const artifactFormat = await detectArtifactFormat(path, handle, signal);
       if (artifactFormat !== undefined) {
         const identity = {
           path,
-          sourcePath: process.platform === "win32" ? candidate : canonical,
+          sourcePath,
           sha256: await sha256Handle(handle, path, metadata, signal),
         };
         return isArchiveFormat(artifactFormat)
@@ -194,7 +202,7 @@ export const parseBinaryTarget = async (
         );
       return ok({
         path,
-        sourcePath: process.platform === "win32" ? candidate : canonical,
+        sourcePath,
         ...bundle,
         sha256: await sha256Handle(handle, path, metadata, signal),
         kind: "executable",
@@ -295,7 +303,7 @@ const detectArtifactFormat = async (
     return zipPackageFormatForPath(lower) ?? "zip";
   }
   // Binary plists, including keyed archives, often use other extensions.
-  if (observed.bytesRead === 8 && magic.equals(Buffer.from("bplist00")))
+  if (hasBinaryPlistSignature(magic.subarray(0, observed.bytesRead)))
     return "plist";
   const named = namedArtifactFormat(lower);
   if (named !== undefined) return named;
